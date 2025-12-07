@@ -24,7 +24,7 @@ DEFAULT_THRESHOLD = 0.6
 DEFAULT_MOBILENET_WEIGHT = 0.8
 DEFAULT_ORB_WEIGHT = 0.1
 DEFAULT_FACE_WEIGHT = 0.1
-DEFAULT_AUGMENTATION_COUNT = 5  # Number of augmentations per image
+DEFAULT_AUGMENTATION_COUNT = 2  # Number of augmentations per image
 
 print(f"\n⚖️ Feature weights:")
 print(f"   MobileNet (TensorFlow): {DEFAULT_MOBILENET_WEIGHT}")
