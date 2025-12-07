@@ -1,4 +1,4 @@
-# server.py - ONNX Runtime Version (Railway Optimized)
+# server.py - TensorFlow Lite Version (Railway Compatible)
 import os
 import cv2
 import numpy as np
@@ -10,12 +10,12 @@ from firebase_admin import credentials, storage
 import json
 import tempfile
 import traceback
-import onnxruntime as ort
+import tensorflow as tf
 from typing import List
 import urllib.request
 
 print("=" * 70)
-print("🚀 Starting PawTag Backend - ONNX Runtime Version")
+print("🚀 Starting PawTag Backend - TensorFlow Lite Version")
 print("=" * 70)
 
 # Configuration
@@ -25,80 +25,81 @@ DEFAULT_ORB_WEIGHT = 0.1
 DEFAULT_FACE_WEIGHT = 0.1
 
 print(f"\n⚖️ Feature weights:")
-print(f"   MobileNet (ONNX): {DEFAULT_MOBILENET_WEIGHT}")
+print(f"   MobileNet (TensorFlow): {DEFAULT_MOBILENET_WEIGHT}")
 print(f"   ORB: {DEFAULT_ORB_WEIGHT}")
 print(f"   Facial: {DEFAULT_FACE_WEIGHT}")
 
 # ---------------------------
-# MobileNet Feature Extractor using ONNX
+# MobileNet Feature Extractor using TensorFlow Lite
 # ---------------------------
-print("\n🤖 Initializing MobileNetV2 (ONNX Runtime)...")
+print("\n🤖 Initializing MobileNetV2 (TensorFlow Lite)...")
 
-class ONNXFeatureExtractor:
+class TFLiteFeatureExtractor:
     def __init__(self):
         try:
-            # Use a smaller MobileNet model for Railway
-            model_url = "https://github.com/onnx/models/raw/main/vision/classification/mobilenet/model/mobilenetv2-7.onnx"
-            model_path = "mobilenetv2.onnx"
+            # Use MobileNetV2 from TensorFlow Hub (no download needed)
+            import tensorflow_hub as hub
             
-            # Download model if not exists
-            if not os.path.exists(model_path):
-                print("   ⬇️ Downloading MobileNetV2 ONNX model...")
-                urllib.request.urlretrieve(model_url, model_path)
-                print("   ✅ Model downloaded")
+            print("   ⬇️ Loading MobileNetV2 from TensorFlow Hub...")
             
-            # Initialize ONNX Runtime
-            self.session = ort.InferenceSession(model_path, 
-                                               providers=['CPUExecutionProvider'])
+            # Load MobileNetV2 feature extractor
+            self.model = tf.keras.Sequential([
+                hub.KerasLayer("https://tfhub.dev/google/tf2-preview/mobilenet_v2/feature_vector/4", 
+                              trainable=False)
+            ])
             
-            # Get model details
-            self.input_name = self.session.get_inputs()[0].name
-            self.input_shape = self.session.get_inputs()[0].shape
-            print(f"   ✅ MobileNetV2 ONNX loaded")
-            print(f"   Input shape: {self.input_shape}")
+            # Build model with input shape
+            self.model.build([None, 224, 224, 3])
+            
+            print("   ✅ MobileNetV2 TensorFlow loaded")
+            print(f"   Model summary: {self.model.summary()}")
             
         except Exception as e:
-            print(f"   ❌ Failed to initialize ONNX model: {e}")
-            self.session = None
+            print(f"   ❌ Failed to initialize TensorFlow model: {e}")
+            print("   ⚠️ Trying fallback to local MobileNet...")
+            self.model = self._load_local_mobilenet()
     
-    def preprocess_image(self, image_np: np.ndarray) -> np.ndarray:
-        """Preprocess image for MobileNetV2"""
-        # Convert to RGB if needed
-        if len(image_np.shape) == 2:
-            image_rgb = cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
-        else:
-            image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-        
-        # Resize to 224x224
-        image_resized = cv2.resize(image_rgb, (224, 224))
-        
-        # Normalize (ImageNet stats)
-        image_normalized = image_resized.astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        image_normalized = (image_normalized - mean) / std
-        
-        # Transpose to CHW and add batch dimension
-        input_data = np.transpose(image_normalized, (2, 0, 1))  # HWC to CHW
-        input_data = np.expand_dims(input_data, axis=0)  # Add batch dimension
-        
-        return input_data
+    def _load_local_mobilenet(self):
+        """Fallback to local MobileNetV2"""
+        try:
+            print("   🔄 Loading local MobileNetV2...")
+            model = tf.keras.applications.MobileNetV2(
+                weights='imagenet',
+                include_top=False,
+                pooling='avg',
+                input_shape=(224, 224, 3)
+            )
+            print("   ✅ Local MobileNetV2 loaded")
+            return model
+        except Exception as e:
+            print(f"   ❌ Failed to load local MobileNet: {e}")
+            return None
     
     def extract_features(self, image_np: np.ndarray) -> np.ndarray:
-        if self.session is None:
+        if self.model is None:
             return np.zeros(1280)
         
         try:
-            # Preprocess
-            input_data = self.preprocess_image(image_np)
+            # Convert to RGB if needed
+            if len(image_np.shape) == 2:
+                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
+            else:
+                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
             
-            # Run inference
-            outputs = self.session.run(None, {self.input_name: input_data})
+            # Resize to 224x224
+            image_resized = cv2.resize(image_rgb, (224, 224))
             
-            # Get features (output before classification layer)
-            features = outputs[0].flatten()
+            # Normalize (ImageNet stats)
+            image_normalized = image_resized.astype(np.float32) / 255.0
             
-            # Normalize
+            # Expand dimensions for batch
+            input_data = np.expand_dims(image_normalized, axis=0)
+            
+            # Extract features
+            features = self.model.predict(input_data, verbose=0)
+            features = features.flatten()
+            
+            # Normalize features
             norm = np.linalg.norm(features)
             if norm > 0:
                 features = features / norm
@@ -106,10 +107,10 @@ class ONNXFeatureExtractor:
             return features
             
         except Exception as e:
-            print(f"   ⚠️ ONNX feature extraction error: {e}")
+            print(f"   ⚠️ MobileNet feature extraction error: {e}")
             return np.zeros(1280)
 
-mobilenet_extractor = ONNXFeatureExtractor()
+mobilenet_extractor = TFLiteFeatureExtractor()
 
 # ---------------------------
 # ORB Feature Detector
@@ -446,11 +447,11 @@ async def root():
         "service": "PawTag Hybrid Backend",
         "status": "online",
         "version": "2.0.0",
-        "features": ["MobileNetV2 (ONNX)", "ORB", "Facial Recognition"],
+        "features": ["MobileNetV2 (TensorFlow)", "ORB", "Facial Recognition"],
         "database": {
             "pets_count": len(database),
         },
-        "inference_engine": "ONNX Runtime (CPU)"
+        "inference_engine": "TensorFlow Lite"
     }
 
 @app.post("/identify")
@@ -552,7 +553,7 @@ async def health_check():
         "database_loaded": len(database) > 0,
         "pets_count": len(database),
         "models": {
-            "mobilenet_onnx": mobilenet_extractor.session is not None,
+            "mobilenet_tf": mobilenet_extractor.model is not None,
             "orb": orb is not None,
             "face_recognition": face_rec.face_cascade is not None
         }
@@ -581,6 +582,6 @@ async def refresh_db():
 print("\n" + "=" * 70)
 print("✅ PawTag Hybrid Backend is ready!")
 print(f"📊 Database: {len(database)} pets loaded")
-print(f"🔧 Features: ORB + MobileNetV2 (ONNX) + Facial Recognition")
+print(f"🔧 Features: ORB + MobileNetV2 (TensorFlow) + Facial Recognition")
 print(f"📡 Server ready!")
 print("=" * 70)
