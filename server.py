@@ -34,10 +34,10 @@ except Exception as e:
 # ---------------------------
 # Configuration for Railway
 # ---------------------------
-DEFAULT_MOBILENET_WEIGHT = 0.4  # Reduced for Railway performance
-DEFAULT_ORB_WEIGHT = 0.4        # Increased since ORB works well
-DEFAULT_FACE_WEIGHT = 0.2
-DEFAULT_THRESHOLD = 0.3
+DEFAULT_MOBILENET_WEIGHT = 0.8  # Reduced for Railway performance
+DEFAULT_ORB_WEIGHT = 0.1        # Increased since ORB works well
+DEFAULT_FACE_WEIGHT = 0.1
+DEFAULT_THRESHOLD = 0.6
 DEFAULT_USE_AUGMENTED = True
 DEFAULT_AUGMENTATION_COUNT = 5  # Reduced for Railway memory
 
