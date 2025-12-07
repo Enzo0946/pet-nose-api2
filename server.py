@@ -1,4 +1,4 @@
-# server.py - TensorFlow Lite Version (Railway Compatible) - FIXED
+# server.py - TensorFlow Lite Version (Railway Compatible) - WITH CAT/DOG VALIDATION
 import os
 import cv2
 import numpy as np
@@ -28,6 +28,107 @@ print(f"\n⚖️ Feature weights:")
 print(f"   MobileNet (TensorFlow): {DEFAULT_MOBILENET_WEIGHT}")
 print(f"   ORB: {DEFAULT_ORB_WEIGHT}")
 print(f"   Facial: {DEFAULT_FACE_WEIGHT}")
+
+# ---------------------------
+# NEW: Simple Cat/Dog Validator using MobileNetV2
+# ---------------------------
+print("\n🐱🐕 Initializing Cat/Dog Validator...")
+
+class SimplePetValidator:
+    """Simple validator using MobileNetV2 pre-trained on ImageNet"""
+    
+    def __init__(self):
+        print("   🔧 Loading MobileNetV2...")
+        try:
+            # Load MobileNetV2 (17MB - acceptable for Railway)
+            self.model = tf.keras.applications.MobileNetV2(
+                weights="imagenet",
+                input_shape=(224, 224, 3)
+            )
+            
+            # ImageNet class indices for cats and dogs
+            self.cat_classes = {
+                281, 282, 283, 284, 285, 286, 287, 288, 289  # Cats
+            }
+            
+            self.dog_classes = set(range(151, 269))  # Dogs (151-268)
+            
+            print("   ✅ Cat/Dog Validator loaded (MobileNetV2)")
+            print(f"   📊 Recognizes {len(self.cat_classes)} cat breeds")
+            print(f"   📊 Recognizes {len(self.dog_classes)} dog breeds")
+            
+        except Exception as e:
+            print(f"   ❌ Failed to load Cat/Dog Validator: {e}")
+            self.model = None
+    
+    def is_valid_pet(self, image_array, min_confidence=0.15):
+        """
+        Check if image is a cat or dog
+        Returns: (is_valid, message, details)
+        """
+        if self.model is None:
+            return False, "Validator not initialized", {"error": "Model not loaded"}
+        
+        try:
+            # Preprocess
+            img = cv2.resize(image_array, (224, 224))
+            img = tf.keras.applications.mobilenet_v2.preprocess_input(img)
+            img = np.expand_dims(img, axis=0)
+            
+            # Predict
+            predictions = self.model.predict(img, verbose=0)[0]
+            
+            # Get top 5 predictions
+            top_indices = np.argsort(predictions)[-5:][::-1]
+            
+            # Check each top prediction
+            for idx in top_indices:
+                confidence = float(predictions[idx])
+                
+                if idx in self.cat_classes and confidence > min_confidence:
+                    return True, f"Cat detected ({confidence:.2%})", {
+                        "class": "cat",
+                        "confidence": confidence,
+                        "breed": self._get_breed_name(idx)
+                    }
+                
+                if idx in self.dog_classes and confidence > min_confidence:
+                    return True, f"Dog detected ({confidence:.2%})", {
+                        "class": "dog",
+                        "confidence": confidence,
+                        "breed": self._get_breed_name(idx)
+                    }
+            
+            # If no cat/dog found
+            top_idx = int(top_indices[0])
+            top_conf = float(predictions[top_idx])
+            
+            # Get readable class name
+            from tensorflow.keras.applications.imagenet_utils import decode_predictions
+            decoded = decode_predictions(np.expand_dims(predictions, axis=0), top=1)[0][0]
+            class_name = decoded[1]
+            
+            return False, f"Not a cat or dog. Detected: {class_name} ({top_conf:.2%})", {
+                "detected_class": class_name,
+                "confidence": top_conf
+            }
+            
+        except Exception as e:
+            return False, f"Validation error: {str(e)}", {"error": str(e)}
+    
+    def _get_breed_name(self, class_idx):
+        """Get breed name from class index"""
+        try:
+            from tensorflow.keras.applications.imagenet_utils import decode_predictions
+            # Create dummy predictions
+            dummy_pred = np.zeros(1000)
+            dummy_pred[class_idx] = 1.0
+            decoded = decode_predictions(np.expand_dims(dummy_pred, axis=0), top=1)[0][0]
+            return decoded[1]
+        except:
+            return f"class_{class_idx}"
+
+cat_dog_validator = SimplePetValidator()
 
 # ---------------------------
 # MobileNet Feature Extractor using TensorFlow Lite
@@ -448,8 +549,13 @@ async def root():
     return {
         "service": "PawTag Hybrid Backend",
         "status": "online",
-        "version": "2.0.0",
-        "features": ["MobileNetV2 (TensorFlow)", "ORB", "Facial Recognition"],
+        "version": "4.0.0",
+        "features": [
+            "Cat/Dog Validator (MobileNetV2)",
+            "MobileNetV2 (TensorFlow)", 
+            "ORB",
+            "Facial Recognition"
+        ],
         "database": {
             "pets_count": len(database),
         },
@@ -459,33 +565,82 @@ async def root():
 @app.post("/identify")
 async def identify(
     file: UploadFile = File(...),
-    min_score: float = Query(0.33, description="Minimum confidence score")
+    min_score: float = Query(0.33, description="Minimum confidence score"),
+    strict_validation: bool = Query(False, description="Use strict cat/dog validation"),
+    debug: bool = Query(False, description="Return detailed validation info")
 ):
     """
-    Identify pet from image - Compatible with existing frontend
+    Identify pet from image - Now with Cat/Dog validation
     """
     try:
         print(f"\n🔍 Identification request: {file.filename}")
         print(f"   Min score: {min_score}")
+        print(f"   Strict validation: {strict_validation}")
+        print(f"   Debug mode: {debug}")
         
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if img_color is None:
-            return JSONResponse(status_code=400, content={"error": "Invalid image file"})
+            return JSONResponse(
+                status_code=400, 
+                content={
+                    "success": False,
+                    "error": "INVALID_IMAGE",
+                    "message": "Invalid image file format",
+                    "suggestion": "Please upload a valid JPG, PNG, or JPEG image"
+                }
+            )
+        
+        # NEW: First validate if it's a cat or dog
+        print("   🐱🐕 Validating if image is a cat or dog...")
+        is_cat_or_dog, cat_dog_message, cat_dog_details = cat_dog_validator.is_valid_pet(
+            img_color,
+            min_confidence=0.2 if strict_validation else 0.1  # Higher threshold for strict mode
+        )
+        
+        print(f"   Cat/Dog validation: {'✅ PASS' if is_cat_or_dog else '❌ FAIL'}")
+        print(f"   Validation message: {cat_dog_message}")
+        
+        if not is_cat_or_dog:
+            response = {
+                "success": False,
+                "error": "NOT_CAT_OR_DOG",
+                "message": cat_dog_message,
+                "suggestion": "Please upload a clear photo of a cat or dog. Other animals, humans, and objects are not accepted."
+            }
+            
+            if debug:
+                response["validation_details"] = cat_dog_details
+            
+            return response
+        
+        # Only proceed if it's a valid cat/dog
+        print("   ✅ Valid cat/dog detected. Proceeding with identification...")
         
         img_gray = preprocess_image(contents, is_color=False)
         if img_gray is None:
-            return JSONResponse(status_code=400, content={"error": "Failed to process image"})
+            return JSONResponse(
+                status_code=400, 
+                content={
+                    "success": False,
+                    "error": "PROCESSING_ERROR",
+                    "message": "Failed to process image"
+                }
+            )
         
-        # Extract features from query
+        # Extract features for matching
         orb_kp, orb_desc = extract_orb_features(img_gray)
+        faces = face_rec.detect_face(img_color)
+        
+        print(f"   Feature extraction:")
+        print(f"     - ORB features: {len(orb_kp) if orb_kp else 0}")
+        print(f"     - Faces detected: {len(faces)}")
+        
         mobile_features = mobilenet_extractor.extract_features(img_color)
         facial_features = face_rec.extract_facial_features(img_color)
         
-        print(f"   Query features:")
-        print(f"     - ORB: {len(orb_kp) if orb_kp else 0} keypoints")
         print(f"     - MobileNet: {len(mobile_features)} features")
         print(f"     - Facial: {len(facial_features)} features")
         
@@ -529,24 +684,52 @@ async def identify(
         print(f"   Found {len(matches)} matches above threshold")
         
         if not matches:
-            return {
+            response = {
                 "success": False,
                 "message": "No matching pet found in database",
                 "best_score": "0.00%",
-                "threshold": f"{min_score * 100:.0f}%"
+                "threshold": f"{min_score * 100:.0f}%",
+                "cat_dog_validated": True,
+                "cat_dog_details": cat_dog_details,
+                "suggestion": "This cat/dog is not registered in our system"
             }
+            
+            if debug:
+                response["feature_details"] = {
+                    "orb_features": len(orb_kp) if orb_kp else 0,
+                    "faces_detected": len(faces)
+                }
+            
+            return response
         
-        # Return top 3 matches (compatible with frontend)
-        return {
+        # Prepare success response
+        response = {
             "success": True,
             "message": f"Found {len(matches)} matching pet(s)",
-            "matches": matches[:3]
+            "matches": matches[:3],
+            "cat_dog_validated": True,
+            "cat_dog_details": cat_dog_details
         }
+        
+        if debug:
+            response["feature_details"] = {
+                "orb_features": len(orb_kp) if orb_kp else 0,
+                "faces_detected": len(faces)
+            }
+        
+        return response
         
     except Exception as e:
         print(f"❌ Error during identification: {e}")
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(
+            status_code=500, 
+            content={
+                "success": False,
+                "error": "INTERNAL_ERROR",
+                "message": str(e)
+            }
+        )
 
 @app.get("/health")
 async def health_check():
@@ -555,6 +738,7 @@ async def health_check():
         "database_loaded": len(database) > 0,
         "pets_count": len(database),
         "models": {
+            "cat_dog_validator": cat_dog_validator.model is not None,
             "mobilenet_tf": mobilenet_extractor.model is not None,
             "orb": orb is not None,
             "face_recognition": face_rec.face_cascade is not None
@@ -579,11 +763,46 @@ async def refresh_db():
         
     except Exception as e:
         print(f"❌ Error refreshing database: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(
+            status_code=500, 
+            content={
+                "success": False,
+                "error": "REFRESH_ERROR",
+                "message": str(e)
+            }
+        )
+
+@app.get("/validation-info")
+async def validation_info():
+    """Get information about the validation system"""
+    return {
+        "validation_system": "MobileNetV2 Cat/Dog Classifier",
+        "version": "4.0.0",
+        "features": [
+            "Cat detection (9+ breeds)",
+            "Dog detection (120+ breeds)",
+            "Rejects other animals, humans, objects",
+            "Uses ImageNet pre-trained knowledge"
+        ],
+        "validation_thresholds": {
+            "strict_mode": "20% confidence",
+            "lenient_mode": "10% confidence",
+            "parameter": "strict_validation=true/false"
+        },
+        "api_usage": {
+            "default": "/identify?min_score=0.33",
+            "strict": "/identify?min_score=0.33&strict_validation=true",
+            "debug": "/identify?min_score=0.33&debug=true"
+        }
+    }
 
 print("\n" + "=" * 70)
-print("✅ PawTag Hybrid Backend is ready!")
+print("✅ PawTag Backend is ready!")
 print(f"📊 Database: {len(database)} pets loaded")
-print(f"🔧 Features: ORB + MobileNetV2 (TensorFlow) + Facial Recognition")
+print(f"🔧 Features:")
+print(f"   1. Cat/Dog Validator (MobileNetV2)")
+print(f"   2. ORB Feature Matching")
+print(f"   3. MobileNetV2 Deep Features")
+print(f"   4. Facial Recognition")
 print(f"📡 Server ready!")
 print("=" * 70)
