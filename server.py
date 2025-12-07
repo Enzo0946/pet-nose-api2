@@ -1,4 +1,4 @@
-# server.py - TensorFlow Lite Version (Railway Compatible) - FIXED
+# server.py - TensorFlow Lite Version WITH AUGMENTATION
 import os
 import cv2
 import numpy as np
@@ -13,9 +13,10 @@ import traceback
 import tensorflow as tf
 from typing import List
 import urllib.request
+import random
 
 print("=" * 70)
-print("🚀 Starting PawTag Backend - TensorFlow Lite Version")
+print("🚀 Starting PawTag Backend - TensorFlow Lite Version WITH AUGMENTATION")
 print("=" * 70)
 
 # Configuration
@@ -23,11 +24,65 @@ DEFAULT_THRESHOLD = 0.6
 DEFAULT_MOBILENET_WEIGHT = 0.8
 DEFAULT_ORB_WEIGHT = 0.1
 DEFAULT_FACE_WEIGHT = 0.1
+DEFAULT_AUGMENTATION_COUNT = 5  # Number of augmentations per image
 
 print(f"\n⚖️ Feature weights:")
 print(f"   MobileNet (TensorFlow): {DEFAULT_MOBILENET_WEIGHT}")
 print(f"   ORB: {DEFAULT_ORB_WEIGHT}")
 print(f"   Facial: {DEFAULT_FACE_WEIGHT}")
+print(f"🔧 Augmentation: {DEFAULT_AUGMENTATION_COUNT} versions per image")
+
+# ---------------------------
+# Augmentation Functions
+# ---------------------------
+def augment_image(img_gray, img_color, augmentation_type='simple'):
+    """Generate augmented versions of an image"""
+    augmentations = []
+    
+    # Always include original
+    augmentations.append((img_gray.copy(), img_color.copy(), 'original'))
+    
+    if augmentation_type == 'simple':
+        # 1. Horizontal flip
+        aug_gray = cv2.flip(img_gray, 1)
+        aug_color = cv2.flip(img_color, 1)
+        augmentations.append((aug_gray, aug_color, 'horizontal_flip'))
+        
+        # 2. Brightness variations
+        for factor in [0.8, 1.2]:  # Darker and brighter
+            aug_gray = cv2.convertScaleAbs(img_gray, alpha=factor, beta=0)
+            aug_color = cv2.convertScaleAbs(img_color, alpha=factor, beta=0)
+            augmentations.append((aug_gray, aug_color, f'brightness_{factor}'))
+        
+        # 3. Rotation (±10 degrees)
+        for angle in [10, -10]:
+            h, w = img_gray.shape[:2]
+            M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
+            aug_gray = cv2.warpAffine(img_gray, M, (w, h))
+            aug_color = cv2.warpAffine(img_color, M, (w, h))
+            augmentations.append((aug_gray, aug_color, f'rotation_{angle}'))
+        
+        # 4. Gaussian blur
+        aug_gray = cv2.GaussianBlur(img_gray, (3, 3), 0.5)
+        aug_color = cv2.GaussianBlur(img_color, (3, 3), 0.5)
+        augmentations.append((aug_gray, aug_color, 'gaussian_blur'))
+        
+        # 5. Gaussian noise
+        noise = np.random.normal(0, 15, img_gray.shape).astype(np.uint8)
+        aug_gray = cv2.add(img_gray, noise)
+        noise_color = np.random.normal(0, 15, img_color.shape).astype(np.uint8)
+        aug_color = cv2.add(img_color, noise_color)
+        augmentations.append((aug_gray, aug_color, 'gaussian_noise'))
+    
+    # Limit to requested count
+    if len(augmentations) > DEFAULT_AUGMENTATION_COUNT + 1:  # +1 for original
+        # Keep original and randomly select augmentations
+        original = augmentations[0]
+        others = augmentations[1:]
+        selected = random.sample(others, DEFAULT_AUGMENTATION_COUNT)
+        augmentations = [original] + selected
+    
+    return augmentations
 
 # ---------------------------
 # MobileNet Feature Extractor using TensorFlow Lite
@@ -282,7 +337,7 @@ def init_firebase():
 bucket = init_firebase()
 
 # ---------------------------
-# Helper Functions - FIXED
+# Helper Functions
 # ---------------------------
 def preprocess_image(image_bytes, is_color=False, apply_clahe=True):
     """Fixed: Added optional apply_clahe parameter"""
@@ -357,14 +412,16 @@ def hybrid_match_score(orb_score, mobile_score, face_score,
     return (orb_weight * orb_score) + (mobilenet_weight * mobile_score) + (face_weight * face_score)
 
 # ---------------------------
-# Database Management - FIXED
+# Database Management WITH AUGMENTATION
 # ---------------------------
 database = {}
+original_images_count = 0
+augmented_images_count = 0
 
 def load_database():
-    """Load database from Firebase"""
-    global database
-    print("\n🏗️ Building database...")
+    """Load database from Firebase with augmentation"""
+    global database, original_images_count, augmented_images_count
+    print("\n🏗️ Building database WITH AUGMENTATION...")
     
     if bucket is None:
         print("⚠️ Skipping database - Firebase not available")
@@ -373,6 +430,9 @@ def load_database():
     try:
         blobs = list(bucket.list_blobs(prefix="noseprints/"))
         print(f"📁 Found {len(blobs)} files in Firebase")
+        
+        original_images_count = 0
+        augmented_images_count = 0
         
         for blob in blobs:
             filename = blob.name.lower()
@@ -399,29 +459,47 @@ def load_database():
             if img_gray is None:
                 continue
             
-            # FIXED: Remove apply_clahe parameter for color images
             img_color_processed = preprocess_image(image_bytes, is_color=True)
-            
-            # Extract all features
-            orb_kp, orb_desc = extract_orb_features(img_gray)
-            mobile_features = mobilenet_extractor.extract_features(img_color_processed)
-            facial_features = face_rec.extract_facial_features(img_color_processed)
             
             if pet_id not in database:
                 database[pet_id] = []
             
-            database[pet_id].append({
-                'orb_keypoints': orb_kp,
-                'orb_descriptors': orb_desc,
-                'mobile_features': mobile_features,
-                'facial_features': facial_features,
-                'image_path': blob.name,
-            })
+            # Get augmentations
+            augmentations = augment_image(img_gray, img_color_processed)
+            
+            for idx, (aug_gray, aug_color, aug_type) in enumerate(augmentations):
+                try:
+                    # Extract features from augmented image
+                    orb_kp, orb_desc = extract_orb_features(aug_gray)
+                    mobile_features = mobilenet_extractor.extract_features(aug_color)
+                    facial_features = face_rec.extract_facial_features(aug_color)
+                    
+                    database[pet_id].append({
+                        'orb_keypoints': orb_kp,
+                        'orb_descriptors': orb_desc,
+                        'mobile_features': mobile_features,
+                        'facial_features': facial_features,
+                        'image_path': f"{blob.name}_{aug_type}",
+                        'is_augmented': aug_type != 'original',
+                        'augmentation_type': aug_type
+                    })
+                    
+                    if aug_type == 'original':
+                        original_images_count += 1
+                        print(f"    ↳ Added original image")
+                    else:
+                        augmented_images_count += 1
+                        print(f"    ↳ Added augmentation: {aug_type}")
+                        
+                except Exception as e:
+                    print(f"    ⚠️ Failed to process {aug_type}: {e}")
         
-        print(f"\n✅ Database loaded successfully!")
+        print(f"\n✅ Database loaded successfully WITH AUGMENTATION!")
         print(f"   Total pets: {len(database)}")
-        total_images = sum(len(entries) for entries in database.values())
-        print(f"   Total images: {total_images}")
+        print(f"   Original images: {original_images_count}")
+        print(f"   Augmented images: {augmented_images_count}")
+        print(f"   Total entries: {original_images_count + augmented_images_count}")
+        print(f"   Augmentation ratio: {augmented_images_count / original_images_count:.1f}x")
         
     except Exception as e:
         print(f"❌ Error loading database: {e}")
@@ -446,27 +524,39 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "service": "PawTag Hybrid Backend",
+        "service": "PawTag Hybrid Backend WITH AUGMENTATION",
         "status": "online",
-        "version": "2.0.0",
-        "features": ["MobileNetV2 (TensorFlow)", "ORB", "Facial Recognition"],
+        "version": "2.1.0",
+        "features": ["MobileNetV2 (TensorFlow)", "ORB", "Facial Recognition", "Data Augmentation"],
         "database": {
             "pets_count": len(database),
+            "original_images": original_images_count,
+            "augmented_images": augmented_images_count,
+            "total_entries": original_images_count + augmented_images_count,
+            "augmentation_ratio": f"{augmented_images_count / original_images_count:.1f}x" if original_images_count > 0 else "N/A"
         },
+        "augmentation_techniques": [
+            "horizontal_flip",
+            "brightness_variations",
+            "rotation_±10°", 
+            "gaussian_blur",
+            "gaussian_noise"
+        ],
         "inference_engine": "TensorFlow"
     }
 
 @app.post("/identify")
 async def identify(
     file: UploadFile = File(...),
-    min_score: float = Query(0.33, description="Minimum confidence score")
+    min_score: float = Query(0.33, description="Minimum confidence score"),
+    use_augmented: bool = Query(True, description="Use augmented images in matching")
 ):
     """
     Identify pet from image - Compatible with existing frontend
     """
     try:
         print(f"\n🔍 Identification request: {file.filename}")
-        print(f"   Min score: {min_score}")
+        print(f"   Min score: {min_score}, Use augmented: {use_augmented}")
         
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
@@ -496,6 +586,10 @@ async def identify(
             pet_best_score = 0.0
             
             for entry in entries:
+                # Skip augmented images if not requested
+                if not use_augmented and entry.get('is_augmented', False):
+                    continue
+                
                 # Calculate ORB score
                 orb_score = match_orb_features(orb_desc, entry['orb_descriptors'], 
                                               orb_kp, entry['orb_keypoints'])
@@ -554,6 +648,9 @@ async def health_check():
         "status": "healthy",
         "database_loaded": len(database) > 0,
         "pets_count": len(database),
+        "original_images": original_images_count,
+        "augmented_images": augmented_images_count,
+        "total_entries": original_images_count + augmented_images_count,
         "models": {
             "mobilenet_tf": mobilenet_extractor.model is not None,
             "orb": orb is not None,
@@ -565,15 +662,20 @@ async def health_check():
 async def refresh_db():
     """Refresh database"""
     try:
-        global database
+        global database, original_images_count, augmented_images_count
         database = {}
+        original_images_count = 0
+        augmented_images_count = 0
         load_database()
         
         return {
             "success": True,
-            "message": "Database refreshed",
+            "message": "Database refreshed with augmentation",
             "database_stats": {
                 "pets_count": len(database),
+                "original_images": original_images_count,
+                "augmented_images": augmented_images_count,
+                "total_entries": original_images_count + augmented_images_count
             }
         }
         
@@ -582,8 +684,9 @@ async def refresh_db():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 print("\n" + "=" * 70)
-print("✅ PawTag Hybrid Backend is ready!")
+print("✅ PawTag Hybrid Backend WITH AUGMENTATION is ready!")
 print(f"📊 Database: {len(database)} pets loaded")
+print(f"🔄 Augmentation: {augmented_images_count} augmented images")
 print(f"🔧 Features: ORB + MobileNetV2 (TensorFlow) + Facial Recognition")
 print(f"📡 Server ready!")
 print("=" * 70)
