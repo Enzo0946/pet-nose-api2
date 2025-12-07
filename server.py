@@ -1,4 +1,4 @@
-# server.py - TensorFlow Lite Version (Railway Compatible)
+# server.py - TensorFlow Lite Version (Railway Compatible) - FIXED
 import os
 import cv2
 import numpy as np
@@ -52,7 +52,6 @@ class TFLiteFeatureExtractor:
             self.model.build([None, 224, 224, 3])
             
             print("   ✅ MobileNetV2 TensorFlow loaded")
-            print(f"   Model summary: {self.model.summary()}")
             
         except Exception as e:
             print(f"   ❌ Failed to initialize TensorFlow model: {e}")
@@ -283,9 +282,10 @@ def init_firebase():
 bucket = init_firebase()
 
 # ---------------------------
-# Helper Functions
+# Helper Functions - FIXED
 # ---------------------------
-def preprocess_image(image_bytes, is_color=False):
+def preprocess_image(image_bytes, is_color=False, apply_clahe=True):
+    """Fixed: Added optional apply_clahe parameter"""
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         if is_color:
@@ -296,7 +296,8 @@ def preprocess_image(image_bytes, is_color=False):
         if img is None:
             return None
         
-        if not is_color:
+        # Only apply CLAHE to grayscale images when requested
+        if not is_color and apply_clahe:
             clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
             img = clahe.apply(img)
             img = cv2.GaussianBlur(img, (3, 3), 0)
@@ -356,7 +357,7 @@ def hybrid_match_score(orb_score, mobile_score, face_score,
     return (orb_weight * orb_score) + (mobilenet_weight * mobile_score) + (face_weight * face_score)
 
 # ---------------------------
-# Database Management
+# Database Management - FIXED
 # ---------------------------
 database = {}
 
@@ -398,7 +399,8 @@ def load_database():
             if img_gray is None:
                 continue
             
-            img_color_processed = preprocess_image(image_bytes, is_color=True, apply_clahe=False)
+            # FIXED: Remove apply_clahe parameter for color images
+            img_color_processed = preprocess_image(image_bytes, is_color=True)
             
             # Extract all features
             orb_kp, orb_desc = extract_orb_features(img_gray)
@@ -451,7 +453,7 @@ async def root():
         "database": {
             "pets_count": len(database),
         },
-        "inference_engine": "TensorFlow Lite"
+        "inference_engine": "TensorFlow"
     }
 
 @app.post("/identify")
