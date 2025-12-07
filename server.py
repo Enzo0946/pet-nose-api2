@@ -1,4 +1,4 @@
-# server.py - ENHANCED VERSION FOR RAILWAY DEPLOYMENT
+# server.py - ONNX Runtime Version (Railway Optimized)
 import os
 import cv2
 import numpy as np
@@ -10,135 +10,132 @@ from firebase_admin import credentials, storage
 import json
 import tempfile
 import traceback
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
-from typing import List, Optional
-from datetime import datetime
+import onnxruntime as ort
+from typing import List
+import urllib.request
 
 print("=" * 70)
-print("🚀 Starting PawTag Enhanced Backend - Railway Deployment")
+print("🚀 Starting PawTag Backend - ONNX Runtime Version")
 print("=" * 70)
 
-# Test imports
-try:
-    print(f"✅ NumPy: {np.__version__}")
-    print(f"✅ OpenCV: {cv2.__version__}")
-    print(f"✅ PyTorch: {torch.__version__}")
-    print(f"✅ Device: {'GPU' if torch.cuda.is_available() else 'CPU'}")
-except Exception as e:
-    print(f"❌ Import error: {e}")
-    exit(1)
-
-# ---------------------------
-# Configuration for Railway
-# ---------------------------
-DEFAULT_MOBILENET_WEIGHT = 0.8  # Reduced for Railway performance
-DEFAULT_ORB_WEIGHT = 0.1        # Increased since ORB works well
-DEFAULT_FACE_WEIGHT = 0.1
+# Configuration
 DEFAULT_THRESHOLD = 0.6
-DEFAULT_USE_AUGMENTED = True
-DEFAULT_AUGMENTATION_COUNT = 5  # Reduced for Railway memory
+DEFAULT_MOBILENET_WEIGHT = 0.8
+DEFAULT_ORB_WEIGHT = 0.1
+DEFAULT_FACE_WEIGHT = 0.1
 
-print(f"\n⚖️ Feature weights for Railway:")
-print(f"   MobileNet: {DEFAULT_MOBILENET_WEIGHT}")
+print(f"\n⚖️ Feature weights:")
+print(f"   MobileNet (ONNX): {DEFAULT_MOBILENET_WEIGHT}")
 print(f"   ORB: {DEFAULT_ORB_WEIGHT}")
 print(f"   Facial: {DEFAULT_FACE_WEIGHT}")
 
 # ---------------------------
-# MobileNet Feature Extractor (Lightweight)
+# MobileNet Feature Extractor using ONNX
 # ---------------------------
-print("\n🤖 Initializing MobileNetV2 (Lightweight)...")
+print("\n🤖 Initializing MobileNetV2 (ONNX Runtime)...")
 
-class MobileNetFeatureExtractor:
+class ONNXFeatureExtractor:
     def __init__(self):
         try:
-            # Use smaller model for Railway
-            self.model = models.mobilenet_v2(weights='IMAGENET1K_V1')
-            # Remove classification layer, keep feature extractor
-            self.model = nn.Sequential(*list(self.model.children())[:-1])
-            self.model.eval()
+            # Use a smaller MobileNet model for Railway
+            model_url = "https://github.com/onnx/models/raw/main/vision/classification/mobilenet/model/mobilenetv2-7.onnx"
+            model_path = "mobilenetv2.onnx"
             
-            # Simplified preprocessing for speed
-            self.preprocess = transforms.Compose([
-                transforms.Resize(224),  # Smaller than original
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], 
-                    std=[0.229, 0.224, 0.225]
-                ),
-            ])
+            # Download model if not exists
+            if not os.path.exists(model_path):
+                print("   ⬇️ Downloading MobileNetV2 ONNX model...")
+                urllib.request.urlretrieve(model_url, model_path)
+                print("   ✅ Model downloaded")
             
-            # Use CPU on Railway (likely no GPU)
-            self.device = torch.device('cpu')
-            self.model = self.model.to(self.device)
+            # Initialize ONNX Runtime
+            self.session = ort.InferenceSession(model_path, 
+                                               providers=['CPUExecutionProvider'])
             
-            print(f"   ✅ MobileNetV2 loaded on {self.device}")
+            # Get model details
+            self.input_name = self.session.get_inputs()[0].name
+            self.input_shape = self.session.get_inputs()[0].shape
+            print(f"   ✅ MobileNetV2 ONNX loaded")
+            print(f"   Input shape: {self.input_shape}")
             
         except Exception as e:
-            print(f"   ❌ Failed to initialize MobileNet: {e}")
-            self.model = None
+            print(f"   ❌ Failed to initialize ONNX model: {e}")
+            self.session = None
+    
+    def preprocess_image(self, image_np: np.ndarray) -> np.ndarray:
+        """Preprocess image for MobileNetV2"""
+        # Convert to RGB if needed
+        if len(image_np.shape) == 2:
+            image_rgb = cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
+        else:
+            image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        
+        # Resize to 224x224
+        image_resized = cv2.resize(image_rgb, (224, 224))
+        
+        # Normalize (ImageNet stats)
+        image_normalized = image_resized.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        image_normalized = (image_normalized - mean) / std
+        
+        # Transpose to CHW and add batch dimension
+        input_data = np.transpose(image_normalized, (2, 0, 1))  # HWC to CHW
+        input_data = np.expand_dims(input_data, axis=0)  # Add batch dimension
+        
+        return input_data
     
     def extract_features(self, image_np: np.ndarray) -> np.ndarray:
-        if self.model is None:
+        if self.session is None:
             return np.zeros(1280)
         
         try:
-            # Convert to RGB
-            if len(image_np.shape) == 2:
-                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
-            else:
-                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+            # Preprocess
+            input_data = self.preprocess_image(image_np)
             
-            pil_image = Image.fromarray(image_rgb)
-            input_tensor = self.preprocess(pil_image)
-            input_batch = input_tensor.unsqueeze(0).to(self.device)
+            # Run inference
+            outputs = self.session.run(None, {self.input_name: input_data})
             
-            with torch.no_grad():
-                features = self.model(input_batch)
+            # Get features (output before classification layer)
+            features = outputs[0].flatten()
             
-            features_np = features.squeeze().cpu().numpy().flatten()
-            # Normalize features
-            norm = np.linalg.norm(features_np)
+            # Normalize
+            norm = np.linalg.norm(features)
             if norm > 0:
-                features_np = features_np / norm
+                features = features / norm
             
-            return features_np
+            return features
             
         except Exception as e:
-            print(f"   ⚠️ MobileNet feature extraction error: {e}")
+            print(f"   ⚠️ ONNX feature extraction error: {e}")
             return np.zeros(1280)
 
-mobilenet_extractor = MobileNetFeatureExtractor()
+mobilenet_extractor = ONNXFeatureExtractor()
 
 # ---------------------------
-# ORB Feature Detector (Optimized for Railway)
+# ORB Feature Detector
 # ---------------------------
 print("\n🎯 Setting up ORB detector...")
 try:
-    # Optimized for Railway (fewer features for speed)
     orb = cv2.ORB_create(
-        nfeatures=500,      # Reduced for Railway performance
+        nfeatures=500,
         scaleFactor=1.2,
-        nlevels=4,         # Fewer levels for speed
+        nlevels=4,
         edgeThreshold=15,
         patchSize=20
     )
-    print("   ✅ ORB detector ready (Railway optimized)")
+    print("   ✅ ORB detector ready")
 except Exception as e:
     print(f"   ❌ Failed to initialize ORB: {e}")
     orb = None
 
 # ---------------------------
-# Facial Recognition (Lightweight)
+# Facial Recognition
 # ---------------------------
 print("\n👁️ Setting up facial recognition...")
 
 class FacialRecognition:
     def __init__(self):
         try:
-            # Try to load face cascade
             cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
             self.face_cascade = cv2.CascadeClassifier(cascade_path)
             
@@ -158,25 +155,23 @@ class FacialRecognition:
         
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            # Resize for faster detection on Railway
             scale_factor = 0.5
             small_gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor)
             
             faces = self.face_cascade.detectMultiScale(
                 small_gray,
                 scaleFactor=1.1,
-                minNeighbors=3,  # Reduced for speed
+                minNeighbors=3,
                 minSize=(20, 20),
                 flags=cv2.CASCADE_SCALE_IMAGE
             )
             
-            # Scale back to original size
+            # Scale back
             faces = [(int(x/scale_factor), int(y/scale_factor), 
                      int(w/scale_factor), int(h/scale_factor)) 
                     for (x, y, w, h) in faces]
             
             if len(faces) > 0:
-                # Return only the largest face
                 faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
                 return [faces[0]]
             
@@ -191,7 +186,7 @@ class FacialRecognition:
             faces = self.detect_face(image)
             
             if len(faces) == 0:
-                return np.zeros(1764)  # Smaller feature vector
+                return np.zeros(1764)
             
             x, y, w, h = faces[0]
             face_roi = image[y:y+h, x:x+w]
@@ -199,11 +194,10 @@ class FacialRecognition:
             if face_roi.size == 0:
                 return np.zeros(1764)
             
-            # Smaller face size for Railway
             face_resized = cv2.resize(face_roi, (64, 64))
             face_gray = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY)
             
-            # Simpler HOG features for speed
+            # HOG features
             win_size = (64, 64)
             block_size = (16, 16)
             block_stride = (8, 8)
@@ -248,7 +242,7 @@ class FacialRecognition:
 face_rec = FacialRecognition()
 
 # ---------------------------
-# Firebase Initialization (Same as before)
+# Firebase Initialization
 # ---------------------------
 def init_firebase():
     print("\n🔥 Initializing Firebase...")
@@ -288,10 +282,9 @@ def init_firebase():
 bucket = init_firebase()
 
 # ---------------------------
-# Helper Functions (Optimized)
+# Helper Functions
 # ---------------------------
 def preprocess_image(image_bytes, is_color=False):
-    """Optimized preprocessing for Railway"""
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         if is_color:
@@ -303,7 +296,6 @@ def preprocess_image(image_bytes, is_color=False):
             return None
         
         if not is_color:
-            # Simplified CLAHE for speed
             clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
             img = clahe.apply(img)
             img = cv2.GaussianBlur(img, (3, 3), 0)
@@ -326,18 +318,16 @@ def extract_orb_features(image):
         return [], None
 
 def match_orb_features(desc1, desc2, kp1, kp2):
-    """Optimized matching for Railway"""
     if desc1 is None or desc2 is None:
         return 0.0
     
     try:
-        # Simple BFMatcher for speed
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         matches = bf.knnMatch(desc1, desc2, k=2)
         
         good = []
         for m, n in matches:
-            if m.distance < 0.8 * n.distance:  # Looser ratio for Railway
+            if m.distance < 0.75 * n.distance:
                 good.append(m)
         
         if len(kp1) == 0 or len(kp2) == 0:
@@ -351,7 +341,6 @@ def match_orb_features(desc1, desc2, kp1, kp2):
         return 0.0
 
 def cosine_similarity(vec1, vec2):
-    """Optimized cosine similarity"""
     norm1 = np.linalg.norm(vec1)
     norm2 = np.linalg.norm(vec2)
     
@@ -359,50 +348,21 @@ def cosine_similarity(vec1, vec2):
         return 0.0
     
     similarity = np.dot(vec1, vec2) / (norm1 * norm2)
-    return max(0.0, (similarity + 1) / 2)  # Normalize to 0-1
+    return max(0.0, (similarity + 1) / 2)
 
 def hybrid_match_score(orb_score, mobile_score, face_score, 
                       mobilenet_weight, orb_weight, face_weight):
-    """Weighted combination of all features"""
     return (orb_weight * orb_score) + (mobilenet_weight * mobile_score) + (face_weight * face_score)
-
-# ---------------------------
-# Simple Augmentation for Railway
-# ---------------------------
-def simple_augment_image(img):
-    """Simple augmentation for Railway (fast and memory efficient)"""
-    augmentations = []
-    
-    # 1. Original
-    augmentations.append(img.copy())
-    
-    # 2. Horizontal flip
-    augmentations.append(cv2.flip(img, 1))
-    
-    # 3. Brightness variation
-    augmentations.append(cv2.convertScaleAbs(img, alpha=1.2, beta=20))
-    
-    # 4. Mild blur
-    augmentations.append(cv2.GaussianBlur(img, (3, 3), 0.5))
-    
-    # 5. Small rotation
-    h, w = img.shape[:2]
-    M = cv2.getRotationMatrix2D((w//2, h//2), 10, 1.0)
-    augmentations.append(cv2.warpAffine(img, M, (w, h)))
-    
-    return augmentations
 
 # ---------------------------
 # Database Management
 # ---------------------------
 database = {}
-original_images_count = 0
-augmented_images_count = 0
 
 def load_database():
-    """Load database with simple augmentation for Railway"""
-    global database, original_images_count, augmented_images_count
-    print("\n🏗️ Building database (Railway optimized)...")
+    """Load database from Firebase"""
+    global database
+    print("\n🏗️ Building database...")
     
     if bucket is None:
         print("⚠️ Skipping database - Firebase not available")
@@ -411,9 +371,6 @@ def load_database():
     try:
         blobs = list(bucket.list_blobs(prefix="noseprints/"))
         print(f"📁 Found {len(blobs)} files in Firebase")
-        
-        original_images_count = 0
-        augmented_images_count = 0
         
         for blob in blobs:
             filename = blob.name.lower()
@@ -426,7 +383,7 @@ def load_database():
             
             pet_id = parts[1]
             
-            print(f"  📥 Processing: {pet_id} - {blob.name}")
+            print(f"  📥 Processing: {pet_id}")
             
             image_bytes = blob.download_as_bytes()
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -442,7 +399,7 @@ def load_database():
             
             img_color_processed = preprocess_image(image_bytes, is_color=True, apply_clahe=False)
             
-            # Process original image
+            # Extract all features
             orb_kp, orb_desc = extract_orb_features(img_gray)
             mobile_features = mobilenet_extractor.extract_features(img_color_processed)
             facial_features = face_rec.extract_facial_features(img_color_processed)
@@ -456,54 +413,17 @@ def load_database():
                 'mobile_features': mobile_features,
                 'facial_features': facial_features,
                 'image_path': blob.name,
-                'is_augmented': False,
-                'augmentation_type': 'original'
             })
-            original_images_count += 1
-            
-            # Generate simple augmentations (limited for Railway)
-            if DEFAULT_AUGMENTATION_COUNT > 0:
-                aug_images = simple_augment_image(img_gray)
-                
-                # Limit augmentations
-                for idx, aug_img in enumerate(aug_images[:DEFAULT_AUGMENTATION_COUNT]):
-                    try:
-                        # Process augmented image
-                        orb_kp_aug, orb_desc_aug = extract_orb_features(aug_img)
-                        
-                        # Use same color image for MobileNet/Facial (or create color version)
-                        if len(img_color.shape) == 3:
-                            mobile_features_aug = mobilenet_extractor.extract_features(img_color)
-                            facial_features_aug = face_rec.extract_facial_features(img_color)
-                        else:
-                            mobile_features_aug = np.zeros(1280)
-                            facial_features_aug = np.zeros(1764)
-                        
-                        database[pet_id].append({
-                            'orb_keypoints': orb_kp_aug,
-                            'orb_descriptors': orb_desc_aug,
-                            'mobile_features': mobile_features_aug,
-                            'facial_features': facial_features_aug,
-                            'image_path': f"{blob.name}_aug{idx+1}",
-                            'is_augmented': True,
-                            'augmentation_type': f'aug_{idx+1}'
-                        })
-                        augmented_images_count += 1
-                        
-                    except Exception as e:
-                        print(f"  ⚠️ Failed to generate augmentation {idx+1}: {e}")
         
         print(f"\n✅ Database loaded successfully!")
         print(f"   Total pets: {len(database)}")
-        print(f"   Original images: {original_images_count}")
-        print(f"   Augmented images: {augmented_images_count}")
-        print(f"   Total entries: {original_images_count + augmented_images_count}")
+        total_images = sum(len(entries) for entries in database.values())
+        print(f"   Total images: {total_images}")
         
     except Exception as e:
         print(f"❌ Error loading database: {e}")
         traceback.print_exc()
 
-# Load database at startup
 load_database()
 
 # ---------------------------
@@ -512,7 +432,6 @@ load_database()
 print("🚀 Creating FastAPI app...")
 app = FastAPI()
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -524,50 +443,27 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "service": "PawTag Enhanced Backend",
+        "service": "PawTag Hybrid Backend",
         "status": "online",
         "version": "2.0.0",
-        "features": ["ORB", "MobileNet", "Facial Recognition"],
+        "features": ["MobileNetV2 (ONNX)", "ORB", "Facial Recognition"],
         "database": {
             "pets_count": len(database),
-            "original_images": original_images_count,
-            "augmented_images": augmented_images_count,
-            "total_entries": original_images_count + augmented_images_count
         },
-        "settings": {
-            "default_threshold": DEFAULT_THRESHOLD,
-            "default_weights": {
-                "mobilenet": DEFAULT_MOBILENET_WEIGHT,
-                "orb": DEFAULT_ORB_WEIGHT,
-                "face": DEFAULT_FACE_WEIGHT
-            },
-            "augmentation_enabled": DEFAULT_AUGMENTATION_COUNT > 0
-        }
+        "inference_engine": "ONNX Runtime (CPU)"
     }
 
 @app.post("/identify")
-async def identify_pet(
+async def identify(
     file: UploadFile = File(...),
-    threshold: float = Query(DEFAULT_THRESHOLD, description="Minimum confidence score (0-1)"),
-    mobilenet_weight: float = Query(DEFAULT_MOBILENET_WEIGHT, description="Weight for MobileNet features (0-1)"),
-    orb_weight: float = Query(DEFAULT_ORB_WEIGHT, description="Weight for ORB features (0-1)"),
-    face_weight: float = Query(DEFAULT_FACE_WEIGHT, description="Weight for facial features (0-1)"),
-    use_augmented: bool = Query(DEFAULT_USE_AUGMENTED, description="Use augmented images in matching")
+    min_score: float = Query(0.33, description="Minimum confidence score")
 ):
     """
-    Identify pet from image using hybrid approach (ORB + MobileNet + Facial)
+    Identify pet from image - Compatible with existing frontend
     """
     try:
-        # Validate weights
-        weight_sum = mobilenet_weight + orb_weight + face_weight
-        if abs(weight_sum - 1.0) > 0.001:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Weights must sum to 1.0"}
-            )
-        
-        print(f"\n🔍 Identification started: {file.filename}")
-        print(f"   Threshold: {threshold}, Weights: M={mobilenet_weight}, O={orb_weight}, F={face_weight}")
+        print(f"\n🔍 Identification request: {file.filename}")
+        print(f"   Min score: {min_score}")
         
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
@@ -580,115 +476,73 @@ async def identify_pet(
         if img_gray is None:
             return JSONResponse(status_code=400, content={"error": "Failed to process image"})
         
-        # Extract features from query image
+        # Extract features from query
         orb_kp, orb_desc = extract_orb_features(img_gray)
         mobile_features = mobilenet_extractor.extract_features(img_color)
         facial_features = face_rec.extract_facial_features(img_color)
         
-        print(f"   Query features - ORB: {len(orb_kp) if orb_kp else 0} keypoints")
+        print(f"   Query features:")
+        print(f"     - ORB: {len(orb_kp) if orb_kp else 0} keypoints")
+        print(f"     - MobileNet: {len(mobile_features)} features")
+        print(f"     - Facial: {len(facial_features)} features")
         
-        # Find best match
-        best_score = 0.0
-        best_pet_id = None
-        best_component_scores = {}
+        # Find matches
+        matches = []
         
         for pet_id, entries in database.items():
             pet_best_score = 0.0
-            pet_component_scores = {}
             
             for entry in entries:
-                if not use_augmented and entry['is_augmented']:
-                    continue
-                
                 # Calculate ORB score
-                orb_score = 0.0
-                if orb_weight > 0:
-                    orb_score = match_orb_features(orb_desc, entry['orb_descriptors'], 
-                                                  orb_kp, entry['orb_keypoints'])
+                orb_score = match_orb_features(orb_desc, entry['orb_descriptors'], 
+                                              orb_kp, entry['orb_keypoints'])
                 
                 # Calculate MobileNet score
-                mobile_score = 0.0
-                if mobilenet_weight > 0:
-                    mobile_score = cosine_similarity(mobile_features, entry['mobile_features'])
+                mobile_score = cosine_similarity(mobile_features, entry['mobile_features'])
                 
                 # Calculate face score
-                face_score = 0.0
-                if face_weight > 0:
-                    face_score = face_rec.compute_facial_similarity(facial_features, entry['facial_features'])
+                face_score = face_rec.compute_facial_similarity(facial_features, entry['facial_features'])
                 
-                # Calculate hybrid score
-                hybrid_score = hybrid_match_score(orb_score, mobile_score, face_score,
-                                                 mobilenet_weight, orb_weight, face_weight)
+                # Combined score (weighted)
+                combined_score = hybrid_match_score(
+                    orb_score, mobile_score, face_score,
+                    DEFAULT_MOBILENET_WEIGHT, DEFAULT_ORB_WEIGHT, DEFAULT_FACE_WEIGHT
+                )
                 
-                if hybrid_score > pet_best_score:
-                    pet_best_score = hybrid_score
-                    pet_component_scores = {
-                        "orb": round(orb_score, 3),
-                        "mobilenet": round(mobile_score, 3),
-                        "facial": round(face_score, 3)
-                    }
+                if combined_score > pet_best_score:
+                    pet_best_score = combined_score
             
-            if pet_best_score > best_score:
-                best_score = pet_best_score
-                best_pet_id = pet_id
-                best_component_scores = pet_component_scores
+            # Add to matches if above threshold
+            if pet_best_score >= min_score:
+                matches.append({
+                    "pet_id": pet_id,
+                    "score": pet_best_score,
+                    "score_percent": f"{pet_best_score * 100:.2f}%"
+                })
         
-        print(f"   Best match: {best_pet_id} with score: {best_score:.3f}")
+        # Sort by score
+        matches.sort(key=lambda x: x["score"], reverse=True)
         
-        # Prepare response
-        if best_score >= threshold:
-            response = {
-                "success": True,
-                "predicted_pet_id": best_pet_id,
-                "confidence": round(best_score, 4),
-                "confidence_percentage": f"{best_score * 100:.1f}%",
-                "component_scores": best_component_scores,
-                "message": f"Match found: {best_pet_id} (Confidence: {best_score * 100:.1f}%)"
-            }
-        else:
-            response = {
+        print(f"   Found {len(matches)} matches above threshold")
+        
+        if not matches:
+            return {
                 "success": False,
-                "message": f"No match found above threshold {threshold * 100:.0f}%",
-                "best_match": best_pet_id,
-                "best_score": round(best_score, 4),
-                "best_score_percentage": f"{best_score * 100:.1f}%",
-                "component_scores": best_component_scores,
-                "threshold_required": f"{threshold * 100:.0f}%"
+                "message": "No matching pet found in database",
+                "best_score": "0.00%",
+                "threshold": f"{min_score * 100:.0f}%"
             }
         
-        print(f"✅ Identification complete")
-        return response
+        # Return top 3 matches (compatible with frontend)
+        return {
+            "success": True,
+            "message": f"Found {len(matches)} matching pet(s)",
+            "matches": matches[:3]
+        }
         
     except Exception as e:
         print(f"❌ Error during identification: {e}")
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/refresh")
-async def refresh_db():
-    """
-    Refresh the database from Firebase
-    """
-    try:
-        global database, original_images_count, augmented_images_count
-        database = {}
-        original_images_count = 0
-        augmented_images_count = 0
-        load_database()
-        
-        return {
-            "success": True,
-            "message": "Database refreshed",
-            "database_stats": {
-                "pets_count": len(database),
-                "original_images": original_images_count,
-                "augmented_images": augmented_images_count,
-                "total_entries": original_images_count + augmented_images_count
-            }
-        }
-        
-    except Exception as e:
-        print(f"❌ Error refreshing database: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/health")
@@ -697,42 +551,36 @@ async def health_check():
         "status": "healthy",
         "database_loaded": len(database) > 0,
         "pets_count": len(database),
-        "total_images": original_images_count + augmented_images_count,
         "models": {
-            "mobilenet": mobilenet_extractor.model is not None,
+            "mobilenet_onnx": mobilenet_extractor.session is not None,
             "orb": orb is not None,
             "face_recognition": face_rec.face_cascade is not None
         }
     }
 
-# Keep your existing evaluate endpoint for compatibility
-@app.get("/evaluate")
-async def evaluate(threshold: float = 0.3):
-    print(f"📊 Evaluation request with threshold: {threshold}")
-    
-    # Simplified evaluation for Railway
-    if not database:
-        return {"error": "Database is empty"}
-    
-    # You can implement a simpler evaluation here
-    # For now, return basic info
-    return {
-        "database_stats": {
-            "pets": len(database),
-            "total_images": sum(len(entries) for entries in database.values())
-        },
-        "threshold_used": threshold,
-        "note": "Full evaluation requires more computation. Use /health for system status."
-    }
+@app.get("/refresh")
+async def refresh_db():
+    """Refresh database"""
+    try:
+        global database
+        database = {}
+        load_database()
+        
+        return {
+            "success": True,
+            "message": "Database refreshed",
+            "database_stats": {
+                "pets_count": len(database),
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error refreshing database: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 print("\n" + "=" * 70)
-print("✅ PawTag Enhanced Backend is ready on Railway!")
+print("✅ PawTag Hybrid Backend is ready!")
 print(f"📊 Database: {len(database)} pets loaded")
-print(f"🔄 Augmentation: {augmented_images_count} augmented images")
-print("\n🌐 Endpoints:")
-print("   POST /identify - Identify pet with hybrid features")
-print("   GET  /refresh  - Refresh database")
-print("   GET  /health   - Health check")
-print("   GET  /evaluate - Basic evaluation")
-print("\n📡 Server ready at: https://your-railway-app.up.railway.app")
+print(f"🔧 Features: ORB + MobileNetV2 (ONNX) + Facial Recognition")
+print(f"📡 Server ready!")
 print("=" * 70)
