@@ -5,4 +5,5 @@ numpy==1.24.3
 firebase-admin==6.2.0
 Pillow==10.1.0
 python-multipart==0.0.6
-tensorflow==2.15.0  # Lightweight CPU version
+tensorflow==2.15.0
+tensorflow-hub==0.15.0
