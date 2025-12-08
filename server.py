@@ -1,4 +1,4 @@
-# server.py - TensorFlow Lite Version (Railway Compatible) - WITH LIGHT AUGMENTATION
+# server.py - TensorFlow Lite Version (Railway Compatible) - WITH JSON SERIALIZATION FIX
 import os
 import cv2
 import numpy as np
@@ -11,7 +11,7 @@ import json
 import tempfile
 import traceback
 import tensorflow as tf
-from typing import List
+from typing import List, Dict, Any, Union
 import urllib.request
 import random
 
@@ -44,6 +44,52 @@ print(f"\n⚖️ Feature weights:")
 print(f"   MobileNet (TensorFlow): {DEFAULT_MOBILENET_WEIGHT}")
 print(f"   ORB: {DEFAULT_ORB_WEIGHT}")
 print(f"   Facial: {DEFAULT_FACE_WEIGHT}")
+
+# ---------------------------
+# IMPROVED REJECTION THRESHOLDS
+# ---------------------------
+print("\n🛡️ Setting up IMPROVED pet rejection thresholds...")
+
+# Primary threshold - Most important for rejection
+MIN_MATCH_SCORE_FOR_DB = 0.60  # Increased from 0.55
+
+# Secondary check - Only reject if score is very low
+MIN_ACCEPTABLE_SCORE = 0.35  # Lowered from 0.40
+
+# Score difference - More lenient for similar pets
+UNCERTAIN_SCORE_DIFF = 0.08  # Lowered from 0.15 (much more lenient)
+
+# NEW: Absolute minimum score to even consider rejection
+ABSOLUTE_MIN_SCORE = 0.25
+
+# NEW: High confidence threshold - if above this, always accept
+HIGH_CONFIDENCE_THRESHOLD = 0.75
+
+print(f"   Database acceptance threshold: {MIN_MATCH_SCORE_FOR_DB}")
+print(f"   High confidence threshold: {HIGH_CONFIDENCE_THRESHOLD}")
+print(f"   Minimum acceptable score: {MIN_ACCEPTABLE_SCORE}")
+print(f"   Absolute minimum score: {ABSOLUTE_MIN_SCORE}")
+print(f"   Uncertain match threshold: {UNCERTAIN_SCORE_DIFF} (more lenient)")
+
+# ---------------------------
+# UTILITY FUNCTIONS FOR JSON SERIALIZATION
+# ---------------------------
+def convert_to_serializable(obj: Any) -> Any:
+    """Convert numpy types and other non-serializable objects to JSON-serializable types"""
+    if isinstance(obj, (np.integer, np.int8, np.int16, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(item) for item in obj]
+    else:
+        return obj
 
 # ---------------------------
 # LIGHT AUGMENTATION FUNCTIONS (Memory Efficient)
@@ -145,7 +191,7 @@ class SharedMobileNet:
                     breed = self._get_breed_name(idx)
                     return True, f"Cat detected ({confidence:.2%})", {
                         "class": "cat",
-                        "confidence": confidence,
+                        "confidence": float(confidence),
                         "breed": breed
                     }
                 
@@ -153,7 +199,7 @@ class SharedMobileNet:
                     breed = self._get_breed_name(idx)
                     return True, f"Dog detected ({confidence:.2%})", {
                         "class": "dog",
-                        "confidence": confidence,
+                        "confidence": float(confidence),
                         "breed": breed
                     }
             
@@ -168,7 +214,7 @@ class SharedMobileNet:
             
             return False, f"Not a cat or dog. Detected: {class_name} ({top_conf:.2%})", {
                 "detected_class": class_name,
-                "confidence": top_conf
+                "confidence": float(top_conf)
             }
             
         except Exception as e:
@@ -628,7 +674,7 @@ print("\n🚀 Creating FastAPI app...")
 app = FastAPI(
     title="PawTag Hybrid Backend",
     description="Pet identification with light augmentation for Railway",
-    version="4.1.0",
+    version="4.4.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -647,18 +693,25 @@ async def root():
     return {
         "service": "PawTag Hybrid Backend",
         "status": "online",
-        "version": "4.1.0",
+        "version": "4.4.0",
         "features": [
             "Cat/Dog Validator (MobileNetV2)",
             "MobileNetV2 Feature Extraction", 
             "ORB Feature Matching",
             "Facial Recognition",
-            "Light Data Augmentation"
+            "Light Data Augmentation",
+            "Improved Pet Rejection System"
         ],
         "database": {
             "pets_count": len(database),
             "total_entries": total_entries,
             "has_augmentation": True
+        },
+        "rejection_system": {
+            "active": True,
+            "high_confidence_threshold": HIGH_CONFIDENCE_THRESHOLD,
+            "database_threshold": MIN_MATCH_SCORE_FOR_DB,
+            "min_acceptable_score": MIN_ACCEPTABLE_SCORE
         },
         "memory_optimized": True,
         "platform": "Railway"
@@ -714,9 +767,9 @@ async def identify(
             }
             
             if debug:
-                response["validation_details"] = cat_dog_details
+                response["validation_details"] = convert_to_serializable(cat_dog_details)
             
-            return response
+            return JSONResponse(content=convert_to_serializable(response))
         
         # Only proceed if it's a valid cat/dog
         print("   ✅ Valid cat/dog detected. Proceeding with identification...")
@@ -725,11 +778,11 @@ async def identify(
         if img_gray is None:
             return JSONResponse(
                 status_code=400, 
-                content={
+                content=convert_to_serializable({
                     "success": False,
                     "error": "PROCESSING_ERROR",
                     "message": "Failed to process image"
-                }
+                })
             )
         
         # Extract features from query image
@@ -744,6 +797,7 @@ async def identify(
         
         # Find matches against augmented database
         matches = []
+        scores_by_pet = {}  # Track best scores per pet
         
         for pet_id, entries in database.items():
             pet_best_score = 0.0
@@ -768,11 +822,14 @@ async def identify(
                 if combined_score > pet_best_score:
                     pet_best_score = combined_score
             
+            # Store the best score for this pet
+            scores_by_pet[pet_id] = pet_best_score
+            
             # Add to matches if above threshold
             if pet_best_score >= min_score:
                 matches.append({
                     "pet_id": pet_id,
-                    "score": pet_best_score,
+                    "score": float(pet_best_score),
                     "score_percent": f"{pet_best_score * 100:.2f}%"
                 })
         
@@ -780,59 +837,186 @@ async def identify(
         matches.sort(key=lambda x: x["score"], reverse=True)
         
         print(f"   Found {len(matches)} matches above threshold")
+        if matches:
+            print(f"   Best match score: {matches[0]['score']:.2f}")
+            print(f"   Second best score: {matches[1]['score'] if len(matches) > 1 else 0:.2f}")
         
-        if not matches:
+        # IMPROVED: REJECTION LOGIC FOR NON-DATABASE PETS
+        should_reject = False
+        rejection_reason = ""
+        rejection_details = {}
+        
+        if len(matches) == 0:
+            # No matches at all
+            should_reject = True
+            rejection_reason = "NO_DATABASE_MATCH"
+            rejection_details = {
+                "best_score_found": 0.0,
+                "threshold_required": float(min_score),
+                "message": "No matching pets found in database"
+            }
+        else:
+            top_match = matches[0]
+            top_score = top_match["score"]
+            
+            # HIGH CONFIDENCE CHECK: If score is very high, accept immediately
+            if top_score >= HIGH_CONFIDENCE_THRESHOLD:
+                print(f"   ✅ High confidence match ({top_score:.2f} >= {HIGH_CONFIDENCE_THRESHOLD}) - Accepting")
+                should_reject = False
+            else:
+                # PRIMARY CHECK: Is the top score high enough for database?
+                if top_score < MIN_MATCH_SCORE_FOR_DB:
+                    should_reject = True
+                    rejection_reason = "LOW_CONFIDENCE_MATCH"
+                    rejection_details = {
+                        "best_score": float(top_score),
+                        "database_threshold": float(MIN_MATCH_SCORE_FOR_DB),
+                        "message": f"Best match ({top_score:.2f}) is below database acceptance threshold ({MIN_MATCH_SCORE_FOR_DB})"
+                    }
+                
+                # UNCERTAINTY CHECK: Only apply if we have multiple matches AND score is borderline
+                elif len(matches) > 1 and top_score < HIGH_CONFIDENCE_THRESHOLD:
+                    second_score = matches[1]["score"]
+                    score_diff = top_score - second_score
+                    
+                    # Only reject for uncertainty if:
+                    # 1. Difference is very small AND
+                    # 2. Top score is not already very high
+                    if score_diff < UNCERTAIN_SCORE_DIFF and top_score < 0.65:
+                        should_reject = True
+                        rejection_reason = "UNCERTAIN_MATCH"
+                        rejection_details = {
+                            "top_score": float(top_score),
+                            "second_score": float(second_score),
+                            "difference": float(score_diff),
+                            "required_difference": float(UNCERTAIN_SCORE_DIFF),
+                            "message": f"Top matches are too close ({score_diff:.2f} difference) and confidence is borderline"
+                        }
+                    else:
+                        print(f"   ✅ Acceptable match difference: {score_diff:.2f} (top score: {top_score:.2f})")
+                
+                # ABSOLUTE MINIMUM CHECK: Is the score just too low overall?
+                if top_score < ABSOLUTE_MIN_SCORE:
+                    should_reject = True
+                    rejection_reason = "INSUFFICIENT_OVERALL_SCORE"
+                    rejection_details = {
+                        "score": float(top_score),
+                        "absolute_minimum": float(ABSOLUTE_MIN_SCORE),
+                        "message": f"Overall match confidence ({top_score:.2f}) is too low"
+                    }
+        
+        # Handle rejection
+        if should_reject:
+            print(f"   ❌ Rejecting: {rejection_reason}")
+            print(f"   📊 Details: {rejection_details['message']}")
+            
+            # Get top 3 scores for debugging
+            top_scores_list = []
+            for i, match in enumerate(matches[:3]):
+                top_scores_list.append({
+                    "rank": i + 1,
+                    "pet_id": match["pet_id"],
+                    "score": float(match["score"]),
+                    "score_percent": f"{match['score'] * 100:.1f}%"
+                })
+            
             response = {
                 "success": False,
-                "message": "No matching pet found in database",
-                "best_score": "0.00%",
-                "threshold": f"{min_score * 100:.0f}%",
+                "error": "PET_NOT_IN_DATABASE",
+                "message": "This pet is not registered in our database",
+                "rejection_reason": rejection_reason,
+                "rejection_details": rejection_details,
                 "cat_dog_validated": True,
-                "cat_dog_details": cat_dog_details,
-                "suggestion": "This cat/dog is not registered in our system",
-                "database_has_augmentation": True
+                "cat_dog_details": convert_to_serializable(cat_dog_details),
+                "match_stats": {
+                    "matches_found": len(matches),
+                    "database_threshold_used": float(MIN_MATCH_SCORE_FOR_DB),
+                    "high_confidence_threshold": float(HIGH_CONFIDENCE_THRESHOLD),
+                    "top_matches": convert_to_serializable(top_scores_list) if debug else len(top_scores_list)
+                },
+                "suggestion": "This appears to be a cat/dog, but it's not registered in our system. Please register the pet first."
             }
             
             if debug:
-                response["feature_details"] = {
-                    "orb_features": len(orb_kp) if orb_kp else 0,
-                    "faces_detected": len(face_rec.detect_face(img_color))
-                }
+                # Calculate average score for context
+                if scores_by_pet:
+                    scores_list = list(scores_by_pet.values())
+                    avg_score = float(np.mean(scores_list))
+                    median_score = float(np.median(scores_list))
+                    max_score = float(max(scores_list))
+                    
+                    response["feature_scores"] = {
+                        "orb_features": len(orb_kp) if orb_kp else 0,
+                        "faces_detected": len(face_rec.detect_face(img_color)),
+                        "score_distribution": {
+                            "average": avg_score,
+                            "median": median_score,
+                            "maximum": max_score,
+                            "pets_above_0.5": sum(1 for s in scores_by_pet.values() if s > 0.5)
+                        }
+                    }
             
-            return response
+            return JSONResponse(content=convert_to_serializable(response))
+        
+        # If not rejected, proceed with success response
+        # Limit to top 3 matches for response
+        top_matches = matches[:3]
+        
+        # Determine confidence level
+        top_score = top_matches[0]["score"]
+        if top_score >= HIGH_CONFIDENCE_THRESHOLD:
+            confidence_level = "very_high"
+        elif top_score >= 0.65:
+            confidence_level = "high"
+        elif top_score >= 0.55:
+            confidence_level = "medium"
+        else:
+            confidence_level = "low"
         
         # Prepare success response
         response = {
             "success": True,
-            "message": f"Found {len(matches)} matching pet(s)",
-            "matches": matches[:3],
+            "message": f"Found confident match in database",
+            "matches": convert_to_serializable(top_matches),
+            "match_confidence": confidence_level,
             "cat_dog_validated": True,
-            "cat_dog_details": cat_dog_details,
+            "cat_dog_details": convert_to_serializable(cat_dog_details),
             "database_has_augmentation": True,
-            "augmentation_benefit": "Database includes augmented versions for better matching"
+            "rejection_check": {
+                "passed": True,
+                "top_score": float(top_matches[0]["score"]),
+                "database_threshold": float(MIN_MATCH_SCORE_FOR_DB),
+                "high_confidence_met": bool(top_score >= HIGH_CONFIDENCE_THRESHOLD)
+            }
         }
         
         if debug:
-            response["feature_details"] = {
-                "orb_features": len(orb_kp) if orb_kp else 0,
-                "faces_detected": len(face_rec.detect_face(img_color)),
-                "mobile_features_count": len(mobile_features),
-                "facial_features_count": len(facial_features)
+            top_score_diff = float(matches[0]["score"] - matches[1]["score"]) if len(matches) > 1 else 1.0
+            response["debug_info"] = {
+                "total_matches": len(matches),
+                "top_score_difference": top_score_diff,
+                "uncertainty_threshold": float(UNCERTAIN_SCORE_DIFF),
+                "feature_details": {
+                    "orb_features": len(orb_kp) if orb_kp else 0,
+                    "faces_detected": len(face_rec.detect_face(img_color)),
+                    "mobile_features_count": len(mobile_features),
+                    "facial_features_count": len(facial_features)
+                }
             }
         
-        return response
+        return JSONResponse(content=convert_to_serializable(response))
         
     except Exception as e:
         print(f"❌ Error during identification: {e}")
         traceback.print_exc()
         return JSONResponse(
             status_code=500, 
-            content={
+            content=convert_to_serializable({
                 "success": False,
                 "error": "INTERNAL_ERROR",
                 "message": str(e),
                 "suggestion": "Server is under memory pressure. Try again or contact support."
-            }
+            })
         )
 
 @app.get("/health")
@@ -842,13 +1026,22 @@ async def health_check():
     
     health_data = {
         "status": "healthy",
-        "database_loaded": len(database) > 0,
+        "database_loaded": bool(len(database) > 0),
         "pets_count": len(database),
         "total_database_entries": total_entries,
+        "rejection_system": {
+            "active": True,
+            "high_confidence_threshold": float(HIGH_CONFIDENCE_THRESHOLD),
+            "database_threshold": float(MIN_MATCH_SCORE_FOR_DB),
+            "min_acceptable_score": float(MIN_ACCEPTABLE_SCORE),
+            "absolute_min_score": float(ABSOLUTE_MIN_SCORE),
+            "uncertain_threshold": float(UNCERTAIN_SCORE_DIFF),
+            "logic": "High confidence (>0.75) always accepts. Otherwise checks thresholds."
+        },
         "models": {
-            "shared_mobilenet": shared_mobilenet.base_model is not None,
-            "orb": orb is not None,
-            "face_recognition": face_rec.face_cascade is not None
+            "shared_mobilenet": bool(shared_mobilenet.base_model is not None),
+            "orb": bool(orb is not None),
+            "face_recognition": bool(face_rec.face_cascade is not None)
         },
         "augmentation": {
             "enabled": True,
@@ -861,9 +1054,9 @@ async def health_check():
         import psutil
         memory = psutil.virtual_memory()
         health_data["memory"] = {
-            "total_mb": memory.total // (1024 * 1024),
-            "available_mb": memory.available // (1024 * 1024),
-            "percent_used": memory.percent,
+            "total_mb": int(memory.total // (1024 * 1024)),
+            "available_mb": int(memory.available // (1024 * 1024)),
+            "percent_used": float(memory.percent),
             "railway_limit_mb": 512
         }
         health_data["optimizations"] = {
@@ -875,7 +1068,7 @@ async def health_check():
     except:
         health_data["memory"] = {"info": "Not available"}
     
-    return health_data
+    return JSONResponse(content=convert_to_serializable(health_data))
 
 @app.get("/refresh")
 async def refresh_db():
@@ -887,7 +1080,7 @@ async def refresh_db():
         
         total_entries = sum(len(entries) for entries in database.values()) if database else 0
         
-        return {
+        response = {
             "success": True,
             "message": "Database refreshed with light augmentation",
             "database_stats": {
@@ -897,23 +1090,25 @@ async def refresh_db():
             }
         }
         
+        return JSONResponse(content=convert_to_serializable(response))
+        
     except Exception as e:
         print(f"❌ Error refreshing database: {e}")
         return JSONResponse(
             status_code=500, 
-            content={
+            content=convert_to_serializable({
                 "success": False,
                 "error": "REFRESH_ERROR",
                 "message": str(e)
-            }
+            })
         )
 
 @app.get("/augmentation-info")
 async def augmentation_info():
     """Get information about the augmentation system"""
-    return {
+    response = {
         "augmentation_system": "Light Memory-Efficient Augmentation",
-        "version": "4.1.0",
+        "version": "4.4.0",
         "features": [
             "Horizontal flip (always)",
             "Mild brightness adjustment (50% chance)",
@@ -928,11 +1123,13 @@ async def augmentation_info():
         ],
         "railway_compatibility": {
             "target_memory": "Under 450MB",
-            "free_tier_limit": "512MB",
+            "free_tier_limit": 512,
             "buffer_for_new_data": "~60MB"
         },
         "expected_improvement": "5-10% accuracy boost with augmentation"
     }
+    
+    return JSONResponse(content=convert_to_serializable(response))
 
 @app.get("/memory-status")
 async def memory_status():
@@ -943,32 +1140,58 @@ async def memory_status():
         memory = psutil.virtual_memory()
         process = psutil.Process(os.getpid())
         
-        return {
+        response = {
             "system_memory": {
-                "total_mb": memory.total // (1024 * 1024),
-                "available_mb": memory.available // (1024 * 1024),
-                "used_mb": memory.used // (1024 * 1024),
-                "percent_used": memory.percent
+                "total_mb": int(memory.total // (1024 * 1024)),
+                "available_mb": int(memory.available // (1024 * 1024)),
+                "used_mb": int(memory.used // (1024 * 1024)),
+                "percent_used": float(memory.percent)
             },
             "process_memory": {
-                "rss_mb": process.memory_info().rss // (1024 * 1024),
-                "vms_mb": process.memory_info().vms // (1024 * 1024)
+                "rss_mb": int(process.memory_info().rss // (1024 * 1024)),
+                "vms_mb": int(process.memory_info().vms // (1024 * 1024))
             },
             "railway_limits": {
                 "free_tier_mb": 512,
-                "current_usage_mb": process.memory_info().rss // (1024 * 1024),
-                "available_buffer_mb": 512 - (process.memory_info().rss // (1024 * 1024))
+                "current_usage_mb": int(process.memory_info().rss // (1024 * 1024)),
+                "available_buffer_mb": 512 - int(process.memory_info().rss // (1024 * 1024))
             },
             "recommendation": "Keep usage under 450MB for new dataset uploads"
         }
+        
+        return JSONResponse(content=convert_to_serializable(response))
     except Exception as e:
-        return {
+        return JSONResponse(content=convert_to_serializable({
             "error": f"Could not get memory status: {str(e)}",
             "recommendation": "Install psutil package for memory monitoring"
+        }))
+
+@app.get("/rejection-settings")
+async def get_rejection_settings():
+    """Get current rejection threshold settings"""
+    total_entries = sum(len(entries) for entries in database.values()) if database else 0
+    avg_features = sum(len(entries) for entries in database.values()) / len(database) if database else 0
+    
+    response = {
+        "rejection_system": "Active (Improved v4.4.0)",
+        "thresholds": {
+            "high_confidence_threshold": float(HIGH_CONFIDENCE_THRESHOLD),
+            "min_match_for_database": float(MIN_MATCH_SCORE_FOR_DB),
+            "min_acceptable_score": float(MIN_ACCEPTABLE_SCORE),
+            "absolute_min_score": float(ABSOLUTE_MIN_SCORE),
+            "uncertain_score_diff": float(UNCERTAIN_SCORE_DIFF),
+            "logic_explanation": "High confidence (>0.75) always accepts. Otherwise checks other thresholds."
+        },
+        "database_stats": {
+            "total_pets": len(database),
+            "avg_features_per_pet": float(avg_features)
         }
+    }
+    
+    return JSONResponse(content=convert_to_serializable(response))
 
 print("\n" + "=" * 70)
-print("✅ PawTag Backend v4.1.0 is ready!")
+print("✅ PawTag Backend v4.4.0 is ready!")
 print(f"📊 Database: {len(database)} pets loaded (with light augmentation)")
 total_entries = sum(len(entries) for entries in database.values()) if database else 0
 print(f"📈 Total database entries: {total_entries}")
@@ -978,6 +1201,13 @@ print(f"   2. ORB Feature Matching (300 features)")
 print(f"   3. MobileNetV2 Deep Features (Shared model)")
 print(f"   4. Facial Recognition (Memory optimized)")
 print(f"   5. Light Data Augmentation (2-3x)")
+print(f"   6. Improved Pet Rejection System (Smart thresholds)")
+print(f"   7. JSON Serialization Fix (Numpy compatibility)")
+print(f"🛡️ Improved rejection thresholds:")
+print(f"   - High confidence: >{HIGH_CONFIDENCE_THRESHOLD} (always accepts)")
+print(f"   - Database match: >{MIN_MATCH_SCORE_FOR_DB}")
+print(f"   - Absolute minimum: >{ABSOLUTE_MIN_SCORE}")
+print(f"   - Score difference: >{UNCERTAIN_SCORE_DIFF} (more lenient)")
 print(f"💾 Memory Optimized for Railway Free Tier")
 print(f"📡 Server ready!")
 print("=" * 70)
